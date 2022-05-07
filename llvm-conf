@@ -1,0 +1,654 @@
+#!/bin/bash
+# Copyright 2002-2021 Gentoo Authors
+# Distributed under the terms of the GNU General Public License v2
+
+# Format of /etc/env.d/60llvm contents:
+#  CURRENT=<SLOT>
+
+: ${ROOT:=/}
+[[ ${ROOT} != */ ]] && ROOT="${ROOT}/"
+[[ ${ROOT} != /* ]] && ROOT="${PWD%/}/${ROOT}"
+EPREFIX="@GENTOO_EPREFIX@"
+[[ ${EPREFIX} == @*@ ]] && EPREFIX=""
+EROOT="${ROOT%/}${EPREFIX}/"
+
+cd /
+
+trap ":" INT QUIT TSTP
+
+argv0=${0##*/}
+functions_script="${EPREFIX}/lib/gentoo/functions.sh"
+source "${functions_script}" || {
+	echo "${argv0}: Could not source ${functions_script}!" 1>&2
+	exit 1
+}
+esyslog() { :; }
+has() { [[ " ${*:2} " == *" $1 "* ]]; }
+die() { eerror "${argv0}: $*"; exit 1; }
+umask 022
+
+# *BSD SED does not work as-is, use GNU SED. TODO: find details.
+SED=$(type -P gsed)
+: ${SED:=$(type -P sed)}
+
+# Further pain: `tac` is not available everywhere #390179
+if ! type -P tac >/dev/null ; then
+	tac() { ${SED} -e '1!G;h;$!d' "$@" ; }
+fi
+
+PV="@PV@"
+[[ ${PV} == @*@ ]] && PV="git"
+GENTOO_LIBDIR="@GENTOO_LIBDIR@"
+[[ ${GENTOO_LIBDIR} == @*@ ]] && GENTOO_LIBDIR="lib"
+
+usage() {
+	cat <<-EOF
+	Usage: llvm-conf [options] [CC Profile]
+	       llvm-conf [options] --get-current-profile [CTARGET]
+	Change the current compiler profile, or give info about profiles.
+
+	Options:
+	  -C, --nocolor              Disable color output
+	  -O, --use-old              Use the old profile if one was selected.
+	  -f, --force                Make sure all config files are regenerated.
+	  -c, --get-current-profile  Print current used llvm profile.
+	  -l, --list-profiles        Print a list of available profiles.
+	  -S, --split-profile        Split profiles into their components
+	  -E, --print-environ        Print environment that can be used to setup the
+	                             current llvm profile, or a specified one.
+	  -B, --get-bin-path         Print path where binaries of the given/current
+	                             profile are located.
+	  -L, --get-lib-path         Print path where libraries of the given/current
+	                             profile are located.
+
+	Profile names are of the form:  llvm-<SLOT>
+	                                <profile-number> (as specified in '--list-profiles')
+	                                latest
+	EOF
+	exit ${1:-1}
+}
+[[ $# -lt 1 ]] && usage 1
+
+# Usage: version_sorted_paths <CHOST>
+# Returns paths ordered by version from olders to newest.
+# We use the following hack: assume the input containst digits only in places of versions
+# Normalizer:
+#    echo "hello-world-1.2.3.444.56778" | ${SED} -e 's/[0-9]\+/0000&/g' | ${SED} -e 's/0*\([0-9]\{4\}\)/\1/g'
+#    hello-world-0001.0002.0003.0444.56778
+# That way we can have 9.0 < 10.0 order.
+# TODO: explore how portable 'sort -V' is and try using that instead.
+version_sorted_paths() {
+	local p mangled_v
+	for p in "$@"; do
+		# TODO: avoid -r
+		mangled_v=$(printf "%s" "${p}" |
+			${SED} -e 's/[0-9]\+/0000&/g' |
+			${SED} -e 's/0*\([0-9]\{4\}\)/\1/g'
+		)
+		printf "%s %s\n" "${mangled_v}" "${p}"
+	done | LANG=C sort | $SED -e 's/^.* //g'
+}
+
+# Usage: source_var <var> <file> [default value]
+source_var() {
+	unset $1
+	local val=$(source "$2"; echo "${!1}")
+	: ${val:=$3}
+	eval $1=\"${val}\"
+}
+show_var() {
+	source_var "$@"
+	echo "${!1}"
+}
+
+source_profile() {
+	# Compatibility with profile files created before 2019-09-05.
+	# These profile files were setting PATH variable.
+	# Sourcing them without restoring previous PATH value breaks llvm-conf.
+	local backup_PATH=${PATH}
+
+	source "$1"
+
+	PATH=${backup_PATH}
+}
+
+try_real_hard_to_find_CHOST() {
+	#
+	# First we read make.conf
+	#
+
+	local varname=${1:-CHOST}
+	local conf=${EROOT}/etc/portage/make.conf
+	if [[ ! -e ${conf} && -e ${EROOT}/etc/make.conf ]] ; then
+		conf=${EROOT}/etc/make.conf
+	fi
+	local ret=$(source "${conf}" 2>/dev/null ; echo ${!varname})
+	if [[ -z ${ret} ]] ; then
+		# newer portage supports spaces between the var and =
+		# CHOST     =  "this-is-retarded"
+		ret=$(eval $(
+			${SED} -n \
+				-e 's:[[:space:]]::g' \
+				-e "/^${varname}=/p" \
+				"${conf}"
+			) ; echo ${!varname}
+		)
+	fi
+
+	if [[ -n ${ret} ]] ; then
+		echo ${ret}
+		return 0
+	fi
+}
+
+get_chost() {
+	# If it's set in the env, trust the setting.  If it's wrong,
+	# then that's the caller's problem.
+	[[ -n ${CHOST} ]] && return 0
+
+	export CHOST
+
+	# Make sure Portage isn't broken.
+	CHOST=$(portageq envvar CHOST 2>/dev/null)
+	if [[ $? != 0 || -z ${CHOST} ]] ; then
+		ewarn "Python or Portage seems to be broken, attempting to locate CHOST ourselves ..."
+		CHOST=$(try_real_hard_to_find_CHOST)
+	fi
+
+	if [[ -z ${CHOST} ]] ; then
+		eerror "${argv0}: Could not get portage CHOST!"
+		eerror "${argv0}: You should verify that CHOST is set in one of these places:"
+		eerror "${argv0}:  - ${EROOT}/etc/portage/make.conf"
+		eerror "${argv0}:  - active environment"
+		exit 1
+	fi
+}
+
+# Usage: atomic_ln <source file> <destination dir> <destination file name>
+atomic_ln() {
+	local src=$1 dst=$2 dstfile=$3 tmp
+	tmp="${dst}/.llvm.conf.${dstfile}"
+	# `ln` will expand into unlink();symlink(); which
+	# is not atomic for a small amount of time, but
+	# `mv` is a single rename() call
+	ln -sf "${src}" "${tmp}"
+	mv "${tmp}" "${dst}/${dstfile}"
+}
+
+mv_if_diff() {
+	if cmp -s "$1" "$2" ; then
+		rm -f "$1"
+		return 0
+	else
+		mv -f "$1" "$2"
+		return 1
+	fi
+}
+
+llvm_conf_to_slot() {
+	local conf="${1##*/}"
+	local slot="${conf#60llvm-}"
+	echo $((9999-${slot}))
+}
+
+llvm_slot_to_conf() {
+	echo ${LLVM_ENV}-$((9999-${1}))
+}
+
+update_clang_wrappers() {
+	# if USE_CLANG_WRAPPERS== yes, update
+	# the $CHOST symlinks in /usr/bin
+	#
+	# if USE_NATIVE_LINKS==yes then
+	# create native /usr/bin/{cc,c++,cpp} links
+	# else delete the existing native
+	# /usr/bin/{cc,c++,cpp} links
+	#
+	# symlinks that are handled:
+	#             <TARGET>                  	   <SYMLINK>
+	#  /usr/lib/llvm/<SLOT>/bin/clang 		-> /usr/bin/cc
+	#  /usr/lib/llvm/<SLOT>/bin/clang++ 		-> /usr/bin/c++
+	#  /usr/lib/llvm/<SLOT>/bin/clang-cpp 		-> /usr/bin/cpp
+	#  /usr/lib/llvm/<SLOT>/bin/$CHOST-clang 	-> /usr/bin/$CHOST-cc
+	#  /usr/lib/llvm/<SLOT>/bin/$CHOST-clang++ 	-> /usr/bin/$CHOST-c++
+	#  /usr/lib/llvm/<SLOT>/bin/$CHOST-clang-cpp 	-> /usr/bin/$CHOST-cpp
+	ebegin "Switching native-compiler to clang-${LLVM_SLOT}"
+	
+	source_var ROOTPATH "${envd}"
+	if [[ ! -x "${ROOTPATH}/clang-${LLVM_SLOT}" ]] ; then
+		echo
+		ewarn "${ROOTPATH}/clang-${LLVM_SLOT} executable not found. Skipping..."
+		ewarn "Install Clang for this llvm slot."
+		echo
+		return 1
+	fi
+
+	local clang_wrappers=( cc:clang c++:clang++ cpp:clang-cpp )
+	local refpath
+
+	for x in "${clang_wrappers[@]}" ; do
+		# We want to figure out the 'reference file' for each
+		# wrapper (the binary we're 'wrapping'). See Bug #70548.
+		#
+		# x = cc:clang -> ref = clang
+		# x = cc:clang -> x = cc
+		ref="${x#*:}"
+		x="${x%:*}"
+		
+		# CHOST symlinks
+		refpath="${ROOT}${ROOTPATH}/${CHOST}-${ref}"
+		[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${CHOST}-${x}"
+
+		# Native links
+		if [[ ${USE_NATIVE_LINKS} != yes ]] ; then
+			# Delete stale native symlinks
+			rm -f "${EROOT}usr/bin/${x}"
+		else
+			refpath="${ROOT}${ROOTPATH}/${ref}"
+			[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${x}"
+		fi	
+	done
+	
+	# handle the canonical cpp wrapper
+	if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
+		atomic_ln "${EPRFIX%/}/usr/bin/${CHOST}-cpp" "${EROOOT}lib" "cpp"
+	else
+		rm -f "${EROOT}lib/cpp"
+	fi
+
+	if [[ ${USE_NATIVE_LINKS} == yes ]]; then
+		cp -fpP "${EROOT}"usr/share/llvm-conf/c89 "${EROOT}"usr/bin/c89
+		cp -fpP "${EROOT}"usr/share/llvm-conf/c99 "${EROOT}"usr/bin/c99
+	else
+		rm -f "${EROOT}"usr/bin/c89
+		rm -f "${EROOT}"usr/bin/c99
+	fi
+	eend 0
+}
+
+update_binutils_wrappers() {
+	# if USE_BINUTILS_WRAPPERS== yes, update
+	# the $CHOST symlinks in /usr/bin
+	#
+	# if USE_NATIVE_LINKS==yes then
+	# create native /usr/bin/ld links
+	# else delete the existing native
+	# /usr/bin/{ld,ar,nm} links
+	ebegin "Switching native-binutils to llvm-${LLVM_SLOT} provided binutils"
+	
+	source_var ROOTPATH "${envd}"
+	local BINPATH_LINKS="${EROOT}usr/${CHOST}/bin"
+
+	local binutils_wrappers=(
+		ld:${EPREFIX}/usr/bin/lld
+		addr2line:${ROOTPATH}/llvm-addr2line
+		ar:${ROOTPATH}/llvm-ar
+		as:${ROOTPATH}/llvm-mc
+		c++filt:${ROOTPATH}/llvm-cxxfilt
+		dlltool:${ROOTPATH}/llvm-dlltool
+		dwp:${ROOTPATH}/llvm-dwp
+		mt:${ROOTPATH}/llvm-mt
+		nm:${ROOTPATH}/llvm-nm
+		objcopy:${ROOTPATH}/llvm-objcopy
+		objdump:${ROOTPATH}/llvm-objdump
+		ranlib:${ROOTPATH}/llvm-ranlib
+		readelf:${ROOTPATH}/llvm-readelf
+		size:${ROOTPATH}/llvm-size
+		strings:${ROOTPATH}/llvm-strings
+		strip:${ROOTPATH}/llvm-strip
+	)
+	
+	[[ ! -d ${BINPATH_LINKS} ]] && mkdir -p "${BINPATH_LINKS}"
+	[[ ! -d ${EROOT}usr/bin ]] && mkdir -p "${EROOT}usr/bin"
+	cd "${EROOT}usr/bin" || exit 1
+
+	for x in "${binutils_wrappers[@]}" ; do
+		# We want to figure out the 'reference file' for each
+		# wrapper (the binary we're 'wrapping'). See Bug #70548.
+		#
+		# x = ld:/usr/bin/lld -> ref = /usr/bin/lld
+		# x = ld:/usr/bin/lld -> x = ld
+		ref="${x#*:}"
+		x="${x%:*}"
+
+		# Symlinks handled in order:
+		# /usr/lib/llvm/<SLOT>/bin/$x	-> /usr/$CHOST/bin/$x
+		# /usr/$CHOST/bin/$x        	-> /usr/bin/$CHOST-$x
+		# /usr/bin/$CHOST-$x   		-> /usr/bin/$x
+		if [[ -x ${ref} ]]; then
+			# CHOST symlinks
+			atomic_ln "${ref}" "${BINPATH_LINKS}" "${x}"
+			atomic_ln "${BINPATH_LINKS}/${x}" "${EROOT}usr/bin" "${CHOST}-${x}"
+			# Native links
+			if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
+				atomic_ln "${CHOST}-${x}" "${EROOT}usr/bin" "${x}"
+			else
+				# Delete stale native symlinks
+				rm -f "${EROOT}usr/bin/${x}"
+			fi
+		fi
+	done
+	eend 0
+}
+
+switch_profile() {
+	# Make sure we have write access to the dirs.  Do not require `root`
+	# so that we work with prefix/cross/etc... setups that run as user.
+	#
+	# [It's important we use ${ENV_D} and not e.g. ${EROOT} because for, say
+	# SELinux, we may not actually be able to write to ${EROOT}, but would
+	# be allowed for specific paths like the llvm wrappers we need to
+	# modify. bug #823203.]
+	local LLVM_CONF
+
+	[[ ! -w ${ENV_D} ]] && die "need write access to ${ENV_D}"
+
+	ebegin "Switching default llvm to ${CC_COMP}"
+
+	# Setup things properly again for this profile
+	unset ROOTPATH LDPATH
+	LLVM_SLOT="${CC_COMP#llvm-}"
+	LLVM_CONF="$(llvm_slot_to_conf ${LLVM_SLOT})"
+	source_profile "${LLVM_CONF}"
+
+	local envd envd_changed=0
+	envd="${LLVM_ENV}"
+	cat <<-EOF > "${envd}.tmp"
+		# Autogenerated by 'llvm-conf'.
+		CURRENT=${LLVM_SLOT}
+	EOF
+	cat  "${LLVM_CONF}" >> "${envd}.tmp"
+
+	mv_if_diff "${envd}.tmp" "${envd}"
+	: $(( envd_changed += $? ))
+	
+	if [[ ${ROOT} == "/" ]] && \
+	   [[ ${FORCE} == "yes" || ${envd_changed} -gt 0 ]]
+	then
+		# in case python is broken ...
+		if ! env-update ; then
+			echo ""
+			ewarn "env-update failed to work properly; making sure ld.so.conf paths"
+			ewarn "are setup properly.  Please rerun llvm-conf with the -f option."
+			echo ""
+			if [[ -z ${EPREFIX} ]] ; then
+				if [[ ! -d /etc/ld.so.conf.d ]] ; then
+					show_var LDPATH "${ROOT}"/etc/env.d/60llvm \
+						| ${SED} -e 's|:|\n|g' >> /etc/ld.so.conf
+				fi
+				ldconfig
+			fi
+		fi
+	else
+		envd_changed=0
+	fi
+
+	eend 0
+
+	[[ ${USE_CLANG_WRAPPERS} == yes ]] && update_clang_wrappers
+	[[ ${USE_BINUTILS_WRAPPERS} == yes ]] && update_binutils_wrappers
+
+	# This is needed mainly for MANPATH and INFOPATH updates.
+	if [[ ${envd_changed} -ne 0 ]] ; then
+		echo
+		ewarn "If you intend to use the llvm from the new profile in an already"
+		ewarn "running shell, please remember to do:"
+		echo
+		ewarn "  . ${EPREFIX}/etc/profile"
+		echo
+	fi
+
+	return 0
+}
+
+get_current_profile() {
+	local conf="${LLVM_ENV}"
+	if [[ ! -f ${conf} ]] ; then
+		eerror "${argv0}: No llvm profile is active!"
+		return 1
+	fi
+
+	source_var CURRENT "${conf}"
+
+	if [[ -z ${CURRENT} ]] ; then
+		eerror "${argv0}: No llvm profile is active!"
+		return 1
+	elif [[ ! -f $(llvm_slot_to_conf ${CURRENT}) ]] ; then
+		eerror "${argv0}: Active llvm profile is invalid!"
+		return 1
+	fi
+
+	echo llvm-"${CURRENT}"
+
+	return 0
+}
+
+list_profiles() {
+	local i=0
+	local slot=9999
+	local CURRENT_NATIVE
+
+	if [[ ${ROOT} != "/" ]] ; then
+		echo "Using llvm-conf info in ${ROOT}"
+	fi
+
+	local target=
+	for x in $(version_sorted_paths "${LLVM_ENV}"-*) ; do
+		[[ -f ${x} ]] || continue
+
+		local slot=$(llvm_conf_to_slot "${x}")
+
+		((++i))
+
+		if [[ -e ${LLVM_ENV} ]] ; then
+			source_var CURRENT "${LLVM_ENV}"
+			[[ ${slot} == ${CURRENT} ]] && slot="${slot} ${GOOD}*${NORMAL}"
+		fi
+		echo " [${i}] llvm-${slot}"
+	done
+}
+
+print_environ() {
+	local ENV_CMD SET_ELEMENT
+	case ${SHELL} in
+		*/csh|*/tcsh)
+			ENV_CMD="setenv"
+			SET_ELEMENT=" "
+			;;
+		*)
+			ENV_CMD="export"
+			SET_ELEMENT="="
+			;;
+	esac
+
+	(
+	for var in PATH ; do
+		echo "${ENV_CMD} ${var}${SET_ELEMENT}\"${!var}\""
+	done
+	)
+}
+
+get_bin_path() { show_var ROOTPATH "${LLVM_ENV}" ; }
+get_lib_path() { show_var LDPATH "${LLVM_ENV}" ; }
+
+split_ver() {
+	# Split up the llvm profile into components:
+	# TARGET-VER[-specs] -> TARGET VER [specs]
+	# arm-linux-3.3.6 -> arm-linux 3.3.6
+	# x86_64-linux-4.0.1-pre1234 -> x86_64-linux 4.0.1-pre1234
+	# sh-linux-3.4.4-hardened -> sh-linux 3.4.4 hardened
+	#
+	# So below we will start at the end and run a small state machine ...
+	# specs [3]
+	#    accept everything
+	# specs -> version transition [3->2]
+	#    when we find a version component
+	# version [2]
+	#    accept only version components (see the regex)
+	# version -> target transition [2->1]
+	#    when we hit a non version component
+	# target [1]
+	#    accept everything we have left
+	#
+	echo "$@" | awk -F- '
+	function pushit(onme, pushee) {
+		return (onme == "" ? pushee : pushee"-"onme);
+	}
+	{
+		state=3
+		targ=""
+		ver=""
+		spec=""
+		for (i=NF; i > 0; --i) {
+			if (state >= 2) {
+				if ($i ~ /^(alpha|beta|pre|rc|p)?[[:digit:].]+$/) {
+					ver=pushit(ver, $i)
+					state=2
+				} else if (state == 3)
+					spec=pushit(spec, $i)
+				else
+					state=1
+			}
+			if (state == 1)
+				targ = pushit(targ, $i)
+		}
+
+		if (targ == "") {
+			if (ver == "") {
+				ver=spec
+				spec=""
+			}
+			targ=ver
+			ver=""
+		}
+		print targ " " ver (spec != "" ? " " spec : "")
+	}'
+}
+
+set_doit() {
+	[[ -n ${DOIT} ]] && die "too many actions selected!"
+	DOIT=$1
+}
+DOIT=""
+FORCE="no"
+
+CC_COMP=
+ENV_D="${EROOT}etc/env.d"
+LLVM_ENV="${ENV_D}/60llvm"
+LLVM_SLOT=
+USE_NATIVE_LINKS="@USE_NATIVE_LINKS@"
+USE_CLANG_WRAPPERS="@USE_CLANG_WRAPPERS@"
+USE_BINUTILS_WRAPPERS="@USE_BINUTILS_WRAPPERS@"
+
+for x in "$@" ; do
+	case "${x}" in
+		# Only use specified compiler if one is not already selected.
+		-O|--use-old)
+			if get_current_profile &>/dev/null ; then
+				CC_COMP=$(get_current_profile)
+			else
+				die "No profile selected, unable to utilize --use-old"
+			fi
+			;;
+		-f|--force)
+			FORCE="yes"
+			;;
+		-c|--get-current-profile)
+			set_doit get_current_profile
+			;;
+		-l|--list-profiles)
+			set_doit list_profiles
+			;;
+		-S|--split-profile)
+			if [[ ( $1 != "-S" && $1 != "--split-profile" ) || $# -eq 1 ]] ; then
+				usage 1
+			fi
+			shift # push -S out
+			for x in "$@" ; do
+				split_ver ${x}
+			done
+			exit 0
+			;;
+		-E|--print-environ)
+			set_doit print_environ
+			;;
+		-B|--get-bin-path)
+			set_doit get_bin_path
+			;;
+		-L|--get-lib-path)
+			set_doit get_lib_path
+			;;
+		-x|--debug)
+			set -x
+			;;
+		-C|--nocolor)
+			# nothing to do; functions.sh parsed this for us
+			;;
+		-h|--help)
+			usage 0
+			;;
+		-V|--version)
+			echo "${argv0}: @PV@"
+			exit 0
+			;;
+		--enable-native-links)  USE_NATIVE_LINKS="yes" ;;
+		--disable-native-links) USE_NATIVE_LINKS="no" ;;
+		--enable-clang-wrappers)  USE_CLANG_WRAPPERS="yes" ;;
+		--disable-clang-wrappers) USE_CLANG_WRAPPERS="no" ;;
+		--enable-binutils-wrappers)  USE_BINUTILS_WRAPPERS="yes" ;;
+		--disable-binutils-wrappers) USE_BINUTILS_WRAPPERS="no" ;;
+		-*)
+			die "Invalid switch!  Run ${argv0} without parameters for help."
+			;;
+		*)
+			if [[ -n ${CC_COMP} ]] ; then
+				die "Too many arguments!  Run ${argv0} without parameters for help."
+			fi
+
+			if [[ -z $(echo ${x} | tr -d '[:digit:]') ]] ; then
+				# User gave us a profile index number from '--list-profiles'
+				i=1
+				for y in $(version_sorted_paths "${LLVM_ENV}"-*) ; do
+					[[ -f ${y} ]] || continue
+
+					if [[ -f ${y} ]] && [[ ${x} == ${i} ]] ; then
+						CC_COMP="llvm-$(llvm_conf_to_slot "${y}")"
+						break
+					fi
+					((++i))
+				done
+				if [[ -z ${CC_COMP} ]] ; then
+					die "Could not locate profile #$x !"
+				fi
+			else
+				# User gave us "latest".
+				if [[ ${x} == latest ]]; then
+					x=$(version_sorted_paths "${LLVM_ENV}"-* | head -1)
+					x="llvm-$(llvm_conf_to_slot "${x}")"
+				fi
+				
+				if [[ ! -f ${LLVM_ENV}-$((9999-${x#llvm-})) ]] ; then
+					die "Could not locate '$x' in '${ENV_D}/' !"
+				fi
+				CC_COMP=${x}
+			fi
+			;;
+	esac
+done
+
+[[ -z ${DOIT}${CC_COMP} ]] && usage
+: ${DOIT:="switch_profile"}
+
+get_chost
+if [[ -z ${CC_COMP} ]] ; then
+	CC_COMP=$(get_current_profile)
+	if [[ $? -ne 0 ]] ; then
+		echo "${CC_COMP}"
+		list_profiles
+		exit 1
+	fi
+fi
+
+${DOIT}
+
+# vim:ts=4

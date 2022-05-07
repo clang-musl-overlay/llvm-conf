@@ -1,0 +1,45 @@
+What is llvm-conf?
+-------------------
+
+llvm-conf allows Gentoo users to switch active llvm profile safely
+and allows querying facts about installed llvm toolchains.
+
+To switch active llvm profile while system runs:
+    $ llvm-conf llvm-13
+    $ llvm-conf llvm-12
+
+To switch native compiler to clang while system runs:
+    $ llvm-conf --enable-clang-wrappers llvm-14
+
+To switch active binutils profile to llvm provided binutils while system runs:
+    $ llvm-conf --enable-binutils-wrappers llvm-14
+
+- llvm env.d compiler entries (provided by llvm-conf)
+
+    /etc/env.d/60llvm (native)
+
+      Populates paths for native-compilers
+
+      	CURRENT=<SLOT>
+	PATH="/usr/lib/llvm/<SLOT>/bin"
+	# we need to duplicate it in ROOTPATH for Portage to respect...
+	ROOTPATH="/usr/lib/llvm/<SLOT>/bin"
+	MANPATH="/usr/lib/llvm/<SLOT>/share/man"
+	LDPATH="/usr/lib/llvm/<SLOT>/lib"
+
+      Used by env-update to populate PATH and more.
+
+TODOs
+-----
+
+- Write proper `llvm-conf` manpage off this readme to be more discoverable.
+
+- Figure out symlink ownership story. Today symlinks don't belong to any package.
+
+  See https://bugs.gentoo.org/626606
+
+Releasing
+---------
+
+  $ release=2.3.1; git tag -a -s -m "release ${release}" v${release}; make dist PV=${release}
+  $ git push --tags origin
