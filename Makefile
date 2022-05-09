@@ -75,6 +75,8 @@ install: all
 
 uninstall:
 	rm -rf ${DESTDIR}${BINDIR}/llvm-conf
+	rm -rf ${DESTDIR}${BINDIR}/c89
+	rm -rf ${DESTDIR}${BINDIR}/c99
 	rm -rf ${DESTDIR}${SHAREDIR}
 	rm -rf ${DESTDIR}${DOCDIR}
 

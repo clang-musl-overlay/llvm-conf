@@ -196,9 +196,6 @@ llvm_slot_to_conf() {
 }
 
 update_clang_wrappers() {
-	# if USE_CLANG_WRAPPERS== yes, update
-	# the $CHOST symlinks in /usr/bin
-	#
 	# if USE_NATIVE_LINKS==yes then
 	# create native /usr/bin/{cc,c++,cpp} links
 	# else delete the existing native
@@ -213,13 +210,10 @@ update_clang_wrappers() {
 	#  /usr/lib/llvm/<SLOT>/bin/$CHOST-clang++ 	-> /usr/bin/$CHOST-c++
 	#  /usr/lib/llvm/<SLOT>/bin/$CHOST-clang-cpp 	-> /usr/bin/$CHOST-cpp
 	ebegin "Switching native-compiler to clang-${LLVM_SLOT}"
-	
+
 	source_var ROOTPATH "${envd}"
-	if [[ ! -x "${ROOTPATH}/clang-${LLVM_SLOT}" ]] ; then
-		echo
-		ewarn "${ROOTPATH}/clang-${LLVM_SLOT} executable not found. Skipping..."
-		ewarn "Install Clang for this llvm slot."
-		echo
+	if [[ ! -x "${ROOTPATH}/clang-${LLVM_SLOT}" ]]; then
+		eend 1 "    ${ROOTPATH}/clang-${LLVM_SLOT} executable is missing! Skipped switching..."
 		return 1
 	fi
 
@@ -234,7 +228,7 @@ update_clang_wrappers() {
 		# x = cc:clang -> x = cc
 		ref="${x#*:}"
 		x="${x%:*}"
-		
+
 		# CHOST symlinks
 		refpath="${ROOT}${ROOTPATH}/${CHOST}-${ref}"
 		[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${CHOST}-${x}"
@@ -246,9 +240,9 @@ update_clang_wrappers() {
 		else
 			refpath="${ROOT}${ROOTPATH}/${ref}"
 			[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${x}"
-		fi	
+		fi
 	done
-	
+
 	# handle the canonical cpp wrapper
 	if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
 		atomic_ln "${EPRFIX%/}/usr/bin/${CHOST}-cpp" "${EROOOT}lib" "cpp"
@@ -267,40 +261,38 @@ update_clang_wrappers() {
 }
 
 update_binutils_wrappers() {
-	# if USE_BINUTILS_WRAPPERS== yes, update
-	# the $CHOST symlinks in /usr/bin
-	#
 	# if USE_NATIVE_LINKS==yes then
 	# create native /usr/bin/ld links
 	# else delete the existing native
 	# /usr/bin/{ld,ar,nm} links
 	ebegin "Switching native-binutils to llvm-${LLVM_SLOT} provided binutils"
-	
+
 	source_var ROOTPATH "${envd}"
 	local BINPATH_LINKS="${EROOT}usr/${CHOST}/bin"
 
 	local binutils_wrappers=(
-		ld:${EPREFIX}/usr/bin/lld
-		addr2line:${ROOTPATH}/llvm-addr2line
-		ar:${ROOTPATH}/llvm-ar
-		as:${ROOTPATH}/llvm-mc
-		c++filt:${ROOTPATH}/llvm-cxxfilt
-		dlltool:${ROOTPATH}/llvm-dlltool
-		dwp:${ROOTPATH}/llvm-dwp
-		mt:${ROOTPATH}/llvm-mt
-		nm:${ROOTPATH}/llvm-nm
-		objcopy:${ROOTPATH}/llvm-objcopy
-		objdump:${ROOTPATH}/llvm-objdump
-		ranlib:${ROOTPATH}/llvm-ranlib
-		readelf:${ROOTPATH}/llvm-readelf
-		size:${ROOTPATH}/llvm-size
-		strings:${ROOTPATH}/llvm-strings
-		strip:${ROOTPATH}/llvm-strip
+		ld:${ROOT}${EPREFIX}/usr/bin/lld
+		addr2line:${ROOT}${ROOTPATH}/llvm-addr2line
+		ar:${ROOT}${ROOTPATH}/llvm-ar
+		as:${ROOT}${ROOTPATH}/llvm-mc
+		c++filt:${ROOT}${ROOTPATH}/llvm-cxxfilt
+		dlltool:${ROOT}${ROOTPATH}/llvm-dlltool
+		dwp:${ROOT}${ROOTPATH}/llvm-dwp
+		mt:${ROOT}${ROOTPATH}/llvm-mt
+		nm:${ROOT}${ROOTPATH}/llvm-nm
+		objcopy:${ROOT}${ROOTPATH}/llvm-objcopy
+		objdump:${ROOT}${ROOTPATH}/llvm-objdump
+		ranlib:${ROOT}${ROOTPATH}/llvm-ranlib
+		readelf:${ROOT}${ROOTPATH}/llvm-readelf
+		size:${ROOT}${ROOTPATH}/llvm-size
+		strings:${ROOT}${ROOTPATH}/llvm-strings
+		strip:${ROOT}${ROOTPATH}/llvm-strip
 	)
-	
+
+	# create directories if not present
 	[[ ! -d ${BINPATH_LINKS} ]] && mkdir -p "${BINPATH_LINKS}"
 	[[ ! -d ${EROOT}usr/bin ]] && mkdir -p "${EROOT}usr/bin"
-	cd "${EROOT}usr/bin" || exit 1
+	cd "${EROOT}usr/bin" || exit 1 # should we exit out without printing any info?
 
 	for x in "${binutils_wrappers[@]}" ; do
 		# We want to figure out the 'reference file' for each
@@ -317,7 +309,7 @@ update_binutils_wrappers() {
 		# /usr/bin/$CHOST-$x   		-> /usr/bin/$x
 		if [[ -x ${ref} ]]; then
 			# CHOST symlinks
-			atomic_ln "${ref}" "${BINPATH_LINKS}" "${x}"
+			atomic_ln "${ref#${ROOT}}" "${BINPATH_LINKS}" "${x}"
 			atomic_ln "${BINPATH_LINKS}/${x}" "${EROOT}usr/bin" "${CHOST}-${x}"
 			# Native links
 			if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
@@ -361,7 +353,7 @@ switch_profile() {
 
 	mv_if_diff "${envd}.tmp" "${envd}"
 	: $(( envd_changed += $? ))
-	
+
 	if [[ ${ROOT} == "/" ]] && \
 	   [[ ${FORCE} == "yes" || ${envd_changed} -gt 0 ]]
 	then
@@ -385,7 +377,12 @@ switch_profile() {
 
 	eend 0
 
+	# if USE_CLANG_WRAPPERS == yes, update
+	# the $CHOST symlinks in /usr/bin
 	[[ ${USE_CLANG_WRAPPERS} == yes ]] && update_clang_wrappers
+
+	# if USE_BINUTILS_WRAPPERS == yes, update
+	# the $CHOST symlinks in /usr/bin
 	[[ ${USE_BINUTILS_WRAPPERS} == yes ]] && update_binutils_wrappers
 
 	# This is needed mainly for MANPATH and INFOPATH updates.
@@ -626,8 +623,8 @@ for x in "$@" ; do
 					x=$(version_sorted_paths "${LLVM_ENV}"-* | head -1)
 					x="llvm-$(llvm_conf_to_slot "${x}")"
 				fi
-				
-				if [[ ! -f ${LLVM_ENV}-$((9999-${x#llvm-})) ]] ; then
+
+				If [[ ! -f ${LLVM_ENV}-$((9999-${x#llvm-})) ]] ; then
 					die "Could not locate '$x' in '${ENV_D}/' !"
 				fi
 				CC_COMP=${x}
