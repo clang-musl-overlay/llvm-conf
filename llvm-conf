@@ -624,7 +624,7 @@ for x in "$@" ; do
 					x="llvm-$(llvm_conf_to_slot "${x}")"
 				fi
 
-				If [[ ! -f ${LLVM_ENV}-$((9999-${x#llvm-})) ]] ; then
+				if [[ ! -f ${LLVM_ENV}-$((9999-${x#llvm-})) ]] ; then
 					die "Could not locate '$x' in '${ENV_D}/' !"
 				fi
 				CC_COMP=${x}
