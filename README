@@ -37,6 +37,8 @@ TODOs
 - Figure out symlink ownership story. Today symlinks don't belong to any package.
 
   See https://bugs.gentoo.org/626606
+  
+- Cross compiling is not tested yet and most likely broken
 
 Releasing
 ---------
