@@ -459,7 +459,7 @@ print_environ() {
 	esac
 
 	(
-	for var in ${PATH} ; do
+	for var in PATH ; do
 		echo "${ENV_CMD} ${var}${SET_ELEMENT}\"${!var}\""
 	done
 	)
