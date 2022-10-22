@@ -5,7 +5,7 @@
 # Format of /etc/env.d/60llvm contents:
 #  CURRENT=<SLOT>
 
-: ${ROOT:=/}
+: "${ROOT:=/}"
 [[ ${ROOT} != */ ]] && ROOT="${ROOT}/"
 [[ ${ROOT} != /* ]] && ROOT="${PWD%/}/${ROOT}"
 EPREFIX="@GENTOO_EPREFIX@"
@@ -29,7 +29,7 @@ umask 022
 
 # *BSD SED does not work as-is, use GNU SED. TODO: find details.
 SED=$(type -P gsed)
-: ${SED:=$(type -P sed)}
+: "${SED:=$(type -P sed)}"
 
 # Further pain: `tac` is not available everywhere #390179
 if ! type -P tac >/dev/null ; then
@@ -65,7 +65,7 @@ usage() {
 	                                <profile-number> (as specified in '--list-profiles')
 	                                latest
 	EOF
-	exit ${1:-1}
+	exit "${1:-1}"
 }
 [[ $# -lt 1 ]] && usage 1
 
@@ -91,9 +91,10 @@ version_sorted_paths() {
 
 # Usage: source_var <var> <file> [default value]
 source_var() {
-	unset $1
-	local val=$(source "$2"; echo "${!1}")
-	: ${val:=$3}
+	unset "$1"
+	local val
+	val=$(source "$2"; echo "${!1}")
+	: "${val:=${3}}"
 	eval $1=\"${val}\"
 }
 show_var() {
@@ -116,27 +117,27 @@ try_real_hard_to_find_CHOST() {
 	#
 	# First we read make.conf
 	#
-
+	local ret
 	local varname=${1:-CHOST}
 	local conf=${EROOT}/etc/portage/make.conf
 	if [[ ! -e ${conf} && -e ${EROOT}/etc/make.conf ]] ; then
 		conf=${EROOT}/etc/make.conf
 	fi
-	local ret=$(source "${conf}" 2>/dev/null ; echo ${!varname})
+	ret=$(source "${conf}" 2>/dev/null ; echo "${!varname}")
 	if [[ -z ${ret} ]] ; then
 		# newer portage supports spaces between the var and =
 		# CHOST     =  "this-is-retarded"
-		ret=$(eval $(
+		ret=$(eval "$(
 			${SED} -n \
 				-e 's:[[:space:]]::g' \
 				-e "/^${varname}=/p" \
 				"${conf}"
-			) ; echo ${!varname}
+			)" ; echo "${!varname}"
 		)
 	fi
 
 	if [[ -n ${ret} ]] ; then
-		echo ${ret}
+		echo "${ret}"
 		return 0
 	fi
 }
@@ -188,11 +189,11 @@ mv_if_diff() {
 llvm_conf_to_slot() {
 	local conf="${1##*/}"
 	local slot="${conf#60llvm-}"
-	echo $((9999-${slot}))
+	echo $((9999-slot))
 }
 
 llvm_slot_to_conf() {
-	echo ${LLVM_ENV}-$((9999-${1}))
+	echo "${LLVM_ENV}"-$((9999-${1}))
 }
 
 update_clang_wrappers() {
@@ -231,7 +232,7 @@ update_clang_wrappers() {
 
 		# CHOST symlinks
 		refpath="${ROOT}${ROOTPATH}/${CHOST}-${ref}"
-		[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${CHOST}-${x}"
+		[[ -x ${refpath} ]] && atomic_ln "${refpath#"${ROOT}"}" "${EROOT}usr/bin" "${CHOST}-${x}"
 
 		# Native links
 		if [[ ${USE_NATIVE_LINKS} != yes ]] ; then
@@ -239,13 +240,13 @@ update_clang_wrappers() {
 			rm -f "${EROOT}usr/bin/${x}"
 		else
 			refpath="${ROOT}${ROOTPATH}/${ref}"
-			[[ -x ${refpath} ]] && atomic_ln "${refpath#${ROOT}}" "${EROOT}usr/bin" "${x}"
+			[[ -x ${refpath} ]] && atomic_ln "${refpath#"${ROOT}"}" "${EROOT}usr/bin" "${x}"
 		fi
 	done
 
 	# handle the canonical cpp wrapper
 	if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
-		atomic_ln "${EPRFIX%/}/usr/bin/${CHOST}-cpp" "${EROOOT}lib" "cpp"
+		atomic_ln "${EPREFIX%/}/usr/bin/${CHOST}-cpp" "${EROOT}lib" "cpp"
 	else
 		rm -f "${EROOT}lib/cpp"
 	fi
@@ -271,22 +272,23 @@ update_binutils_wrappers() {
 	local BINPATH_LINKS="${EROOT}usr/${CHOST}/bin"
 
 	local binutils_wrappers=(
-		ld:${ROOT}${EPREFIX}/usr/bin/lld
-		addr2line:${ROOT}${ROOTPATH}/llvm-addr2line
-		ar:${ROOT}${ROOTPATH}/llvm-ar
-		as:${ROOT}${ROOTPATH}/llvm-mc
-		c++filt:${ROOT}${ROOTPATH}/llvm-cxxfilt
-		dlltool:${ROOT}${ROOTPATH}/llvm-dlltool
-		dwp:${ROOT}${ROOTPATH}/llvm-dwp
-		mt:${ROOT}${ROOTPATH}/llvm-mt
-		nm:${ROOT}${ROOTPATH}/llvm-nm
-		objcopy:${ROOT}${ROOTPATH}/llvm-objcopy
-		objdump:${ROOT}${ROOTPATH}/llvm-objdump
-		ranlib:${ROOT}${ROOTPATH}/llvm-ranlib
-		readelf:${ROOT}${ROOTPATH}/llvm-readelf
-		size:${ROOT}${ROOTPATH}/llvm-size
-		strings:${ROOT}${ROOTPATH}/llvm-strings
-		strip:${ROOT}${ROOTPATH}/llvm-strip
+		"addr2line":"${ROOT}${ROOTPATH}/llvm-addr2line"
+		"ar":"${ROOT}${ROOTPATH}/llvm-ar"
+		"as":"${ROOT}${ROOTPATH}/llvm-mc"
+		"c++filt":"${ROOT}${ROOTPATH}/llvm-cxxfilt"
+		"dlltool":"${ROOT}${ROOTPATH}/llvm-dlltool"
+		"dwp":"${ROOT}${ROOTPATH}/llvm-dwp"
+		"mt":"${ROOT}${ROOTPATH}/llvm-mt"
+		"nm":"${ROOT}${ROOTPATH}/llvm-nm"
+		"objcopy":"${ROOT}${ROOTPATH}/llvm-objcopy"
+		"objdump":"${ROOT}${ROOTPATH}/llvm-objdump"
+		"ranlib":"${ROOT}${ROOTPATH}/llvm-ranlib"
+		"readelf":"${ROOT}${ROOTPATH}/llvm-readelf"
+		"size":"${ROOT}${ROOTPATH}/llvm-size"
+		"strings":"${ROOT}${ROOTPATH}/llvm-strings"
+		"strip":"${ROOT}${ROOTPATH}/llvm-strip"
+		"ld.lld":"${ROOT}${ROOTPATH}/ld.lld"
+		"ld":"${ROOT}${ROOTPATH}/lld"
 	)
 
 	# create directories if not present
@@ -309,7 +311,7 @@ update_binutils_wrappers() {
 		# /usr/bin/$CHOST-$x   		-> /usr/bin/$x
 		if [[ -x ${ref} ]]; then
 			# CHOST symlinks
-			atomic_ln "${ref#${ROOT}}" "${BINPATH_LINKS}" "${x}"
+			atomic_ln "${ref#"${ROOT}"}" "${BINPATH_LINKS}" "${x}"
 			atomic_ln "${BINPATH_LINKS}/${x}" "${EROOT}usr/bin" "${CHOST}-${x}"
 			# Native links
 			if [[ ${USE_NATIVE_LINKS} == yes ]] ; then
@@ -340,7 +342,7 @@ switch_profile() {
 	# Setup things properly again for this profile
 	unset ROOTPATH LDPATH
 	LLVM_SLOT="${CC_COMP#llvm-}"
-	LLVM_CONF="$(llvm_slot_to_conf ${LLVM_SLOT})"
+	LLVM_CONF="$(llvm_slot_to_conf "${LLVM_SLOT}")"
 	source_profile "${LLVM_CONF}"
 
 	local envd envd_changed=0
@@ -410,7 +412,7 @@ get_current_profile() {
 	if [[ -z ${CURRENT} ]] ; then
 		eerror "${argv0}: No llvm profile is active!"
 		return 1
-	elif [[ ! -f $(llvm_slot_to_conf ${CURRENT}) ]] ; then
+	elif [[ ! -f $(llvm_slot_to_conf "${CURRENT}") ]] ; then
 		eerror "${argv0}: Active llvm profile is invalid!"
 		return 1
 	fi
@@ -423,23 +425,21 @@ get_current_profile() {
 list_profiles() {
 	local i=0
 	local slot=9999
-	local CURRENT_NATIVE
 
 	if [[ ${ROOT} != "/" ]] ; then
 		echo "Using llvm-conf info in ${ROOT}"
 	fi
 
-	local target=
 	for x in $(version_sorted_paths "${LLVM_ENV}"-*) ; do
 		[[ -f ${x} ]] || continue
 
-		local slot=$(llvm_conf_to_slot "${x}")
+		slot=$(llvm_conf_to_slot "${x}")
 
 		((++i))
 
 		if [[ -e ${LLVM_ENV} ]] ; then
 			source_var CURRENT "${LLVM_ENV}"
-			[[ ${slot} == ${CURRENT} ]] && slot="${slot} ${GOOD}*${NORMAL}"
+			[[ ${slot} == "${CURRENT}" ]] && slot="${slot} ${GOOD}*${NORMAL}"
 		fi
 		echo " [${i}] llvm-${slot}"
 	done
@@ -459,7 +459,7 @@ print_environ() {
 	esac
 
 	(
-	for var in PATH ; do
+	for var in ${PATH} ; do
 		echo "${ENV_CMD} ${var}${SET_ELEMENT}\"${!var}\""
 	done
 	)
@@ -561,8 +561,8 @@ for x in "$@" ; do
 				usage 1
 			fi
 			shift # push -S out
-			for x in "$@" ; do
-				split_ver ${x}
+			for y in "$@" ; do
+				split_ver "${y}"
 			done
 			exit 0
 			;;
@@ -602,13 +602,13 @@ for x in "$@" ; do
 				die "Too many arguments!  Run ${argv0} without parameters for help."
 			fi
 
-			if [[ -z $(echo ${x} | tr -d '[:digit:]') ]] ; then
+			if [[ -z $(echo "${x}" | tr -d '[:digit:]') ]] ; then
 				# User gave us a profile index number from '--list-profiles'
 				i=1
 				for y in $(version_sorted_paths "${LLVM_ENV}"-*) ; do
 					[[ -f ${y} ]] || continue
 
-					if [[ -f ${y} ]] && [[ ${x} == ${i} ]] ; then
+					if [[ -f ${y} ]] && [[ ${x} == "${i}" ]] ; then
 						CC_COMP="llvm-$(llvm_conf_to_slot "${y}")"
 						break
 					fi
@@ -634,7 +634,7 @@ for x in "$@" ; do
 done
 
 [[ -z ${DOIT}${CC_COMP} ]] && usage
-: ${DOIT:="switch_profile"}
+: "${DOIT:="switch_profile"}"
 
 get_chost
 if [[ -z ${CC_COMP} ]] ; then
@@ -648,4 +648,4 @@ fi
 
 ${DOIT}
 
-# vim:ts=4
+# vim: set noexpandtab tabstop=2 :
