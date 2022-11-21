@@ -38,7 +38,7 @@ TODOs
 
   See https://bugs.gentoo.org/626606
   
-- Cross compiling is not tested yet and most likely broken
+- Handling multilib symlinks
 
 Releasing
 ---------
